@@ -1,0 +1,161 @@
+rules_version = '2';
+
+// =====================================================================
+//  پیامک ناشناس — قوانین امنیتی Firestore
+//  این قوانین در سمت سرور اجرا می‌شوند و قابل دور زدن از سمت اپ نیستند:
+//   • فقط کاربر احراز هویت‌شده می‌تواند پیام بفرستد.
+//   • اگر گیرنده دریافت پیام را بسته باشد، نوشتن پیام رد می‌شود.
+//   • اگر گیرنده فرستنده را مسدود کرده باشد، نوشتن پیام رد می‌شود.
+//   • سقف ۲۰ پیام در دقیقه با شمارنده rateLimits/<uid> اعمال می‌شود.
+//   • سند private/<uid> (شماره موبایل) فقط برای صاحب حساب خواندنی است.
+// =====================================================================
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isSelf(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function userDoc(uid) {
+      return get(/databases/$(database)/documents/users/$(uid)).data;
+    }
+
+    // آیا گیرنده فرستنده را مسدود کرده است؟
+    function isBlockedByReceiver() {
+      return exists(/databases/$(database)/documents/blocks/$(request.resource.data.toUid + '__' + request.auth.uid));
+    }
+
+    // آیا فرستنده گیرنده را مسدود کرده است؟
+    function senderBlockedReceiver() {
+      return exists(/databases/$(database)/documents/blocks/$(request.auth.uid + '__' + request.resource.data.toUid));
+    }
+
+    // ---- کاربران -----------------------------------------------------
+    match /users/{uid} {
+      allow read: if signedIn();
+
+      // فقط خود کاربر می‌تواند پروفایل خودش را بسازد و فقط فیلدهای مجاز.
+      allow create: if isSelf(uid)
+        && request.resource.data.uid == uid
+        && request.resource.data.alias is string
+        && request.resource.data.alias.size() >= 3
+        && request.resource.data.alias.size() <= 20
+        && request.resource.data.allowMessages == true
+        && request.resource.data.banned == false;
+
+      // به‌روزرسانی: نام مستعار، بیو و کلید رضایت. فیلد banned فقط توسط مدیر.
+      allow update: if isSelf(uid)
+        && !request.resource.data.diff(resource.data).affectedKeys()
+              .hasAny(['uid', 'banned', 'createdAt', 'blocked'])
+        && request.resource.data.alias.size() >= 3
+        && request.resource.data.alias.size() <= 20;
+
+      allow delete: if isSelf(uid);
+    }
+
+    // ---- شماره موبایل (فقط صاحب حساب) -------------------------------
+    match /private/{uid} {
+      allow read, write: if isSelf(uid);
+    }
+
+    // ---- پیام‌ها -----------------------------------------------------
+    match /messages/{messageId} {
+      // فرستنده و گیرنده هر پیام را می‌بینند.
+      allow read: if signedIn()
+        && (resource.data.fromUid == request.auth.uid
+            || resource.data.toUid == request.auth.uid);
+
+      allow create: if signedIn()
+        && request.resource.data.fromUid == request.auth.uid
+        && request.resource.data.toUid != request.auth.uid
+        && request.resource.data.text is string
+        && request.resource.data.text.size() > 0
+        && request.resource.data.text.size() <= 500
+        && request.resource.data.readAt == 0
+        && request.resource.data.deletedForFrom == false
+        && request.resource.data.deletedForTo == false
+        // رضایت گیرنده: کلید allowMessages باید روشن باشد
+        && userDoc(request.resource.data.toUid).allowMessages == true
+        // گیرنده نباید فرستنده را مسدود کرده باشد
+        && !isBlockedByReceiver()
+        // فرستنده نباید گیرنده را مسدود کرده باشد
+        && !senderBlockedReceiver()
+        // سقف ارسال: حداکثر ۲۰ پیام در هر ۶۰ ثانیه
+        && (
+          !exists(/databases/$(database)/documents/rateLimits/$(request.auth.uid))
+          || (
+            get(/databases/$(database)/documents/rateLimits/$(request.auth.uid)).data.windowStart
+              .toMillis() < request.time.toMillis() - 60000
+          )
+          || (
+            get(/databases/$(database)/documents/rateLimits/$(request.auth.uid)).data.count < 20
+          )
+        );
+
+      // به‌روزرسانی محدود: علامت خوانده‌شدن توسط گیرنده، حذف نرم توسط هر طرف.
+      allow update: if signedIn()
+        && (
+          resource.data.toUid == request.auth.uid
+          || resource.data.fromUid == request.auth.uid
+        )
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['readAt', 'deletedForFrom', 'deletedForTo']);
+
+      allow delete: if false;
+    }
+
+    // ---- مسدودسازی ---------------------------------------------------
+    match /blocks/{blockId} {
+      allow read: if signedIn()
+        && (resource.data.blockerUid == request.auth.uid
+            || resource.data.blockedUid == request.auth.uid);
+
+      allow create: if signedIn()
+        && blockId == request.auth.uid + '__' + request.resource.data.blockedUid
+        && request.resource.data.blockerUid == request.auth.uid
+        && request.resource.data.blockedUid != request.auth.uid;
+
+      allow delete: if signedIn()
+        && (resource.data.blockerUid == request.auth.uid
+            || resource.data.blockedUid == request.auth.uid);
+
+      allow update: if false;
+    }
+
+    // ---- محدودیت نرخ ارسال -------------------------------------------
+    match /rateLimits/{uid} {
+      allow read: if isSelf(uid);
+      allow create: if isSelf(uid)
+        && request.resource.data.count is number
+        && request.resource.data.count >= 1
+        && request.resource.data.count <= 20;
+      allow update: if isSelf(uid)
+        && request.resource.data.count is number
+        && request.resource.data.count <= 20
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['windowStart','count']);
+      allow delete: if false;
+    }
+
+    // ---- گزارش تخلف --------------------------------------------------
+    match /reports/{reportId} {
+      allow create: if signedIn()
+        && request.resource.data.reporterUid == request.auth.uid
+        && request.resource.data.targetUid is string
+        && request.resource.data.targetUid.size() > 0
+        && request.resource.data.reason is string
+        && request.resource.data.reason.size() > 0
+        && request.resource.data.note.size() <= 400
+        && request.resource.data.status == 'open';
+      // گزارش‌ها فقط از کنسول/پنل مدیر خوانده می‌شوند.
+      allow read, update, delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
