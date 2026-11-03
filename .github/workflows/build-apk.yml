@@ -68,8 +68,9 @@ jobs:
       - name: نام‌گذاری خروجی
         run: |
           mkdir -p out
-          find app/build/outputs/apk -type f -name '*.apk' -print
-          find app/build/outputs/apk -type f -name '*.apk' -exec cp {} out/ \\;
+          while IFS= read -r apk; do
+            cp "$apk" out/
+          done < <(find app/build/outputs/apk -type f -name '*.apk')
           ls -lh out
           test -n "$(find out -type f -name '*.apk' -print -quit)" || { echo "::error::هیچ APK ساخته نشد"; exit 1; }
 
