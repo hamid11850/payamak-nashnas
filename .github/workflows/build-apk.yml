@@ -39,18 +39,6 @@ jobs:
         with:
           packages: platform-tools
 
-      - name: ساخت google-services.json از Secret
-        env:
-          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
-        run: |
-          if [ -z "$GOOGLE_SERVICES_JSON_BASE64" ]; then
-            echo "::error::Secret با نام GOOGLE_SERVICES_JSON_BASE64 تنظیم نشده است."
-            echo "فایل google-services.json خود را base64 کنید و در Secrets مخزن قرار دهید."
-            exit 1
-          fi
-          echo "$GOOGLE_SERVICES_JSON_BASE64" | base64 -d > app/google-services.json
-          echo "google-services.json ساخته شد ($(wc -c < app/google-services.json) بایت)"
-
       - name: ساخت Keystore از Secrets
         if: ${{ github.event.inputs.build_debug != 'true' }}
         env:
